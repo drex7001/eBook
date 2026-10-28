@@ -10,6 +10,7 @@ interface Props {
   selected: boolean;
   playing: boolean;
   bilingual: boolean;
+  displayMode?: "original" | "translated" | "both";
 }
 
 function Img({ b, docId, eq }: { b: Block; docId: string; eq?: boolean }) {
@@ -30,14 +31,14 @@ function Img({ b, docId, eq }: { b: Block; docId: string; eq?: boolean }) {
   );
 }
 
-function BlockViewInner({ b, docId, hl, hasNote, selected, playing, bilingual }: Props) {
+function BlockViewInner({ b, docId, hl, hasNote, selected, playing, bilingual, displayMode = "translated" }: Props) {
   const cls = ["blk", `blk-${b.type}`];
-  if (b.status === "pending") cls.push("pending");
-  if (b.status === "failed") cls.push("failed");
+  if (b.status === "pending" && displayMode !== "original") cls.push("pending");
+  if (b.status === "failed" && displayMode !== "original") cls.push("failed");
   if (selected) cls.push("sel");
   if (playing) cls.push("playing");
   if (hl) cls.push(`hl-${hl}`);
-  const text = b.translated || b.source;
+  const text = displayMode === "original" ? b.source : b.translated || b.source;
 
   let body;
   switch (b.type) {
@@ -46,7 +47,7 @@ function BlockViewInner({ b, docId, hl, hasNote, selected, playing, bilingual }:
       body = (
         <>
           <div className={`h h${L}`} role="heading" aria-level={L + 1}>{text}</div>
-          {bilingual && b.translated && <p className="orig">{b.source}</p>}
+          {bilingual && b.translated && <p className="orig"><span className="block-language">Original</span>{b.source}</p>}
         </>
       );
       break;
@@ -59,12 +60,13 @@ function BlockViewInner({ b, docId, hl, hasNote, selected, playing, bilingual }:
       break;
     case "table":
       if (b.table_mode === "html" && b.table) {
-        const cells = b.table_si || b.table;
+        const cells = displayMode === "original" ? b.table : b.translated_table || b.table_si || b.table;
         body = (
           <div className="tablewrap">
             <table><tbody>
               {cells.map((row, i) => <tr key={i}>{row.map((c, j) => <td key={j}>{c}</td>)}</tr>)}
             </tbody></table>
+            {bilingual&&(b.translated_table||b.table_si)&&<table className="orig" aria-label="Original table"><tbody>{b.table.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j}>{cell}</td>)}</tr>)}</tbody></table>}
           </div>
         );
       } else body = <Img b={b} docId={docId} />;
@@ -76,13 +78,15 @@ function BlockViewInner({ b, docId, hl, hasNote, selected, playing, bilingual }:
       body = (
         <>
           <p>{text}</p>
-          {bilingual && b.translated && <p className="orig">{b.source}</p>}
+          {bilingual && b.translated && <p className="orig"><span className="block-language">Original</span>{b.source}</p>}
         </>
       );
   }
   return (
-    <div className={cls.join(" ")} data-seq={b.seq}>
+    <div className={cls.join(" ")} data-seq={b.seq} dir="auto">
+      {bilingual&&b.translated&&<span className="block-language">Translation</span>}
       {body}
+      {displayMode !== "original" && !b.translated && ["paragraph","heading","caption","list_item","footnote"].includes(b.type) && <small className="translation-state">{b.status === "failed" ? "Translation unavailable · original shown" : "Original · translation pending"}</small>}
       {hasNote && <span className="note-mark" aria-label="Has a note" />}
     </div>
   );

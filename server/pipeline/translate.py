@@ -35,7 +35,7 @@ def units_for_row(r) -> list[Unit]:
         out = []
         for i, row in enumerate(cells):
             for j, txt in enumerate(row):
-                if txt and len(re.findall(r"[A-Za-z]", txt)) >= 2:
+                if txt and sum(ch.isalpha() for ch in txt) >= 2:
                     out.append(Unit(f"{r['seq']}.{i}.{j}", r["seq"], "table_cell", txt, (i, j)))
         return out
     if r["type"] in TRANSLATABLE_TEXT and (r["source"] or "").strip():
@@ -133,11 +133,11 @@ class Translator:
         out: dict[str, str] = {}
         for t in res.data.get("translations") or []:
             if isinstance(t, dict) and "id" in t:
-                out[str(t["id"]).strip()] = str(t.get("si") or "").strip()
+                out[str(t["id"]).strip()] = str(t.get("text") or t.get("si") or "").strip()
         return out
 
     def call(self, units: list[Unit], extra: str = "") -> dict[str, str]:
-        res = self.llm.generate_json(prompts.TRANSLATE_SYSTEM, self.build_prompt(units, extra), prompts.TRANSLATE_SCHEMA,
+        res = self.llm.generate_json(prompts.system_for("translate", self.settings), self.build_prompt(units, extra), prompts.translation_schema(),
                                      purpose="translate")
         db.add_usage(self.doc_id, res, "translate")
         return self.parse(res)
@@ -147,7 +147,7 @@ class Translator:
         ok = []
         for u in units:
             si = got.get(u.id, "")
-            issues = qa.check(u.text, si, u.type)
+            issues = qa.check(u.text, si, u.type, getattr(self.settings, "target_language", "si"))
             if not qa.wants_retry(issues):
                 ok.append((u, si, issues))
         return self._save(ok)
@@ -171,7 +171,7 @@ class Translator:
         retry: list[tuple[Unit, list[str]]] = []
         for u in units:
             si = got.get(u.id, "")
-            issues = qa.check(u.text, si, u.type)
+            issues = qa.check(u.text, si, u.type, getattr(self.settings, "target_language", "si"))
             if attempt == 0 and qa.wants_retry(issues):
                 retry.append((u, issues))
             elif "empty" in issues:
@@ -331,7 +331,7 @@ def batch_requests(doc_id: str, llm, settings) -> tuple[list[tuple[str, str, str
     for a, b in work_units(doc_id, settings.translate_batch_chars):
         for units in batches(tr.pending_units(a, b), settings.translate_batch_chars):
             key = f"t{len(reqs)}"
-            reqs.append((key, prompts.TRANSLATE_SYSTEM, tr.build_prompt(units, english_context=True), prompts.TRANSLATE_SCHEMA))
+            reqs.append((key, prompts.system_for("translate", settings), tr.build_prompt(units, english_context=True), prompts.translation_schema()))
             keymap[key] = [u.id for u in units]
     return reqs, keymap
 

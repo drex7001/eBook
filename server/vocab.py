@@ -6,6 +6,7 @@ import json
 import random
 import re
 import time
+import uuid
 
 from . import db
 from .llm import LLMError
@@ -32,26 +33,36 @@ def context_sentence(doc_id: str | None, seq: int | None, word: str) -> str:
     return (r["source"] or "")[:300]
 
 
-def lookup(word: str, doc_id: str | None, seq: int | None, llm) -> dict:
+def lookup(word: str, doc_id: str | None, seq: int | None, llm, settings=None) -> dict:
     word = word.strip(" \t\n'\"’‘“”.,;:()[]")[:60]
-    if not re.search(r"[A-Za-z]", word):
-        raise ValueError("Not an English word.")
+    if not any(c.isalpha() for c in word):
+        raise ValueError("Select a word containing letters.")
+    from .app_settings import get, runtime
+    settings = settings or runtime()
+    source, target = getattr(settings, "source_language", "en"), getattr(settings, "target_language", "si")
     sentence = context_sentence(doc_id, seq, word)
-    key = hashlib.sha1(f"{word.lower()}|{sentence}".encode()).hexdigest()
+    key = hashlib.sha256(f"{word.casefold()}|{sentence}|{source}|{target}|{getattr(settings, 'purpose', 'language')}|{llm.model}|v2".encode()).hexdigest()
     hit = db.q1("SELECT data FROM lookups WHERE key=?", key)
     if hit:
         data = json.loads(hit["data"])
     else:
-        res = llm.generate_json(prompts.LOOKUP_SYSTEM, prompts.lookup_prompt(word, sentence or word),
-                                prompts.LOOKUP_SCHEMA, purpose="lookup")
-        db.add_usage(None, res, "lookup")
+        res = llm.generate_json(prompts.system_for("lookup", settings), prompts.lookup_prompt(word, sentence or word),
+                                prompts.lookup_schema(), purpose="lookup")
+        db.add_usage(doc_id, res, "lookup")
         data = res.data
+        data["meaning_target"] = data.get("meaning_target") or data.get("meaning_si", "")
+        data["meaning_source"] = data.get("meaning_source") or data.get("meaning_en", "")
+        data["context_meaning"] = data.get("context_meaning") or data.get("in_context_si", "")
+        data.update(meaning_si=data["meaning_target"], meaning_en=data["meaning_source"], in_context_si=data["context_meaning"])
+        data["examples"] = [{"source": e.get("source", e.get("en", "")), "target": e.get("target", e.get("si", "")),
+                              "en": e.get("source", e.get("en", "")), "si": e.get("target", e.get("si", ""))} for e in data.get("examples", [])]
         db.ex("INSERT OR REPLACE INTO lookups(key, data, created_at) VALUES(?,?,?)",
               key, json.dumps(data, ensure_ascii=False), time.time())
     data = dict(data)
-    data.update(word=word, context=sentence, doc_id=doc_id, seq=seq)
+    data.update(word=word, context=sentence, doc_id=doc_id, seq=seq, source_language=source, target_language=target)
     lemma = (data.get("lemma") or word).strip().lower()
-    saved = db.q1("SELECT id FROM words WHERE lemma=?", lemma)
+    stored_lemma = lemma if (source, target) in (("en", "si"), ("auto", "si")) else f"{source}|{target}|{lemma}"
+    saved = db.q1("SELECT id FROM words WHERE lemma=?", stored_lemma)
     data["saved_id"] = saved["id"] if saved else None
     return data
 
@@ -62,6 +73,8 @@ def word_api(r) -> dict:
     d = dict(r)
     for k in ("examples", "synonyms"):
         d[k] = json.loads(d[k] or "[]")
+    d["lemma"] = d["lemma"].split("|", 2)[-1]
+    d.update(meaning_target=d["meaning_si"], meaning_source=d["meaning_en"], context_meaning=d["in_context_si"])
     return d
 
 
@@ -69,9 +82,12 @@ def save_word(data: dict) -> dict:
     lemma = (data.get("lemma") or data.get("word") or "").strip().lower()
     if not lemma:
         raise ValueError("No word given.")
+    source, target = data.get("source_language", "en"), data.get("target_language", "si")
+    if (source, target) not in (("en", "si"), ("auto", "si")):
+        lemma = f"{source}|{target}|{lemma}"
     now = time.time()
     row = db.q1("SELECT id FROM words WHERE lemma=?", lemma)
-    fields = dict(word=data.get("word") or lemma, pos=data.get("pos"), ipa=data.get("ipa"),
+    fields = dict(word=data.get("word") or lemma, pos=data.get("pos"), ipa=data.get("ipa"), source_language=source, target_language=target,
                   meaning_en=data.get("meaning_en"), meaning_si=data.get("meaning_si"),
                   in_context_si=data.get("in_context_si"),
                   examples=json.dumps(data.get("examples") or [], ensure_ascii=False),
@@ -90,15 +106,18 @@ def save_word(data: dict) -> dict:
 def stats() -> dict:
     now = time.time()
     r = db.q1("SELECT COUNT(*) AS total, SUM(due_at<=?) AS due, SUM(interval_days>=21) AS known FROM words", now)
-    day = lambda t: int((t + 19800) // DAY)  # noqa: E731  (Sri Lanka time, UTC+5:30)
+    from .progress import day
     days = {day(x["at"]) for x in db.q("SELECT at FROM reviews")}
+    import datetime as dt
     today = day(now)
-    d = today if today in days else today - 1
+    d = dt.date.fromisoformat(today)
+    if today not in days:
+        d -= dt.timedelta(days=1)
     streak = 0
-    while d in days:
+    while d.isoformat() in days:
         streak += 1
-        d -= 1
-    reviewed_today = db.q1("SELECT COUNT(*) AS n FROM reviews WHERE at>=?", today * DAY - 19800)["n"]
+        d -= dt.timedelta(days=1)
+    reviewed_today = sum(day(r["at"]) == today for r in db.q("SELECT at FROM reviews"))
     return {"total": r["total"] or 0, "due": r["due"] or 0, "known": r["known"] or 0,
             "streak": streak, "reviewed_today": reviewed_today}
 
@@ -136,11 +155,16 @@ def record_answer(word_id: int, kind: str, correct: bool) -> dict:
 # ----------------------------------------------------------------------------- questions
 
 def ensure_questions(words: list[dict], llm) -> None:
+    from .app_settings import runtime
+    cfg = runtime()
+    system = (prompts.system_for("vocab_quiz", cfg) + "Generate meaning, cloze, usage and listen questions for every word_id. "
+              "Use the supplied source/target examples and definitions. The options array MUST put the sole correct answer FIRST, then three plausible wrong answers. "
+              "Return items with word_id, kind, question, options, explain_si (explanation in the target language; legacy field name), and audio_text (source language, listen questions only).")
     need = [w for w in words if db.q1("SELECT COUNT(*) AS n FROM quiz_items WHERE word_id=?", w["id"])["n"] < len(KINDS)]
     for i in range(0, len(need), 8):
         group = need[i:i + 8]
         try:
-            res = llm.generate_json(prompts.QUIZ_SYSTEM, prompts.quiz_prompt(group), prompts.QUIZ_SCHEMA, purpose="quiz")
+            res = llm.generate_json(system, prompts.quiz_prompt(group), prompts.QUIZ_SCHEMA, purpose="quiz")
         except LLMError:
             continue                       # practice still works with the meaning card for these words
         db.add_usage(None, res, "quiz")
@@ -155,16 +179,20 @@ def ensure_questions(words: list[dict], llm) -> None:
                   str(it.get("audio_text") or ""), time.time())
 
 
-def practice_set(limit: int, llm) -> list[dict]:
+def practice_set(limit: int, llm=None) -> list[dict]:
     now = time.time()
     rows = db.q("SELECT * FROM words WHERE due_at<=? ORDER BY reps>0 DESC, due_at LIMIT ?", now, limit)
     words = [word_api(r) for r in rows]
     if not words:
         return []
-    ensure_questions(words, llm)
+    if llm is not None:
+        ensure_questions(words, llm)
     out = []
     for w in words:
         items = db.q("SELECT * FROM quiz_items WHERE word_id=? ORDER BY uses, COALESCE(last_used,0)", w["id"])
+        from .app_settings import get
+        if get().audio_mode == "off":
+            items = [it for it in items if it["kind"] != "listen"]
         if items:
             it = items[0]
             opts = json.loads(it["options"])
@@ -178,6 +206,9 @@ def practice_set(limit: int, llm) -> list[dict]:
             q = {"item_id": None, "kind": "recall", "question": f"'{w['word']}' කියන්නේ මොකක්ද?", "options": [],
                  "answer": -1, "explain_si": w.get("meaning_si") or "", "audio_text": ""}
         q["word"] = w
+        token = uuid.uuid4().hex
+        db.ex("INSERT INTO quiz_choices(token,word_id,item_id,kind,answer) VALUES(?,?,?,?,?)", token, w["id"], q["item_id"], q["kind"], q["answer"])
+        q["choice_token"] = token
         out.append(q)
     return out
 

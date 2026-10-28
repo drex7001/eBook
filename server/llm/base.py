@@ -8,9 +8,10 @@ from typing import Protocol
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, retryable: bool = False):
+    def __init__(self, message: str, retryable: bool = False, result: LLMResult | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.result = result
 
 
 @dataclass

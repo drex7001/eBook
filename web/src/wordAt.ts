@@ -1,5 +1,5 @@
 /** The English word under a tap, using the browser's caret-from-point API. Null if the tap wasn't on a Latin word. */
-const WORD = /[A-Za-z][A-Za-z'’-]*/;
+const WORD = /[\p{L}\p{M}\p{N}'’-]+/u;
 
 function caretAt(x: number, y: number): { node: Node; offset: number } | null {
   const d = document as Document & {
@@ -22,13 +22,20 @@ export function wordAt(x: number, y: number): string | null {
   if (!c || c.node.nodeType !== Node.TEXT_NODE) return null;
   const text = c.node.textContent || "";
   let a = c.offset, b = c.offset;
-  const isW = (ch: string) => /[A-Za-z'’-]/.test(ch);
-  while (a > 0 && isW(text[a - 1])) a--;
-  while (b < text.length && isW(text[b])) b++;
+  type Part={segment:string;index:number;isWordLike?:boolean};
+  const Segmenter=(Intl as unknown as {Segmenter?:new(locale?:string,opts?:{granularity:string})=>{segment:(text:string)=>Iterable<Part>}}).Segmenter;
+  if(Segmenter){
+    const part=Array.from(new Segmenter(document.documentElement.lang,{granularity:"word"}).segment(text)).find((p)=>p.isWordLike&&c.offset>=p.index&&c.offset<=p.index+p.segment.length);
+    if(!part)return null;a=part.index;b=a+part.segment.length;
+  }else{
+    const isW = (ch: string) => /[\p{L}\p{M}\p{N}'’-]/u.test(ch);
+    while (a > 0 && isW(text[a - 1])) a--;
+    while (b < text.length && isW(text[b])) b++;
+  }
   const m = text.slice(a, b).match(WORD);
   if (!m) return null;
   const word = m[0].replace(/['’-]+$/, "");
-  if (word.length < 2) return null;
+  if (!/\p{L}/u.test(word)) return null;
   // make sure the finger was actually on the word, not in the gap next to it
   const range = document.createRange();
   range.setStart(c.node, a);

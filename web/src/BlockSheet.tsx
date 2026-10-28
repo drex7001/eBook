@@ -5,13 +5,15 @@ import Sheet from "./Sheet";
 import type { Block, Doc, Note, Region } from "./types";
 import { isSpeakable } from "./useAudio";
 import { wordAt } from "./wordAt";
+import { usePrefs, useText } from "./prefs";
+import { go } from "./App";
 
 const COLORS = ["turmeric", "green", "lotus", "sky"] as const;
 
 function PageCrop({ docId, r, size, onZoom }: { docId: string; r: Region; size: [number, number]; onZoom: (u: string) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(0);
-  useLayoutEffect(() => setW(ref.current?.clientWidth ?? 0), []);
+  useLayoutEffect(() => {const observer=new ResizeObserver(() => setW(ref.current?.clientWidth ?? 0));if(ref.current)observer.observe(ref.current);return () => observer.disconnect();}, []);
   const [pw, ph] = size;
   const cx0 = Math.max(0, r.x0 - 14), cx1 = Math.min(pw, r.x1 + 14);
   const cy0 = Math.max(0, r.y0 - 22), cy1 = Math.min(ph, r.y1 + 22);
@@ -49,6 +51,9 @@ export default function BlockSheet({ doc, block, notes, onClose, onListen, onNot
   onClose: () => void; onListen: (seq: number) => void;
   onNotes: (n: Note[]) => void; onBlock: (b: Block) => void; onToast: (m: string) => void;
 }) {
+  const prefs=usePrefs(), t=useText();
+  const showTranslation=prefs.displayMode==="original";
+  const detailText=showTranslation ? block.translated || t("Translation pending — original shown below.","Translation එක තාම නැහැ — original එක පහළ තියෙනවා.") : block.source;
   const [mode, setMode] = useState<"" | "note" | "retranslate">("");
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -89,40 +94,43 @@ export default function BlockSheet({ doc, block, notes, onClose, onListen, onNot
       const b = await api.retranslate(doc.id, block.seq, text.trim());
       onBlock(b);
       setText(""); setMode("");
-      onToast("අලුත් translation එක දැම්මා");
+      onToast(t("Translation updated","අලුත් translation එක දැම්මා"));
     } catch (e) { onToast((e as Error).message); } finally { setBusy(false); }
   };
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(block.translated || block.source);
-      onToast("Copy කළා");
-    } catch { onToast("Copy කරන්න බැරි වුණා"); }
+      await navigator.clipboard.writeText(detailText);
+      onToast(t("Copied","Copy කළා"));
+    } catch { onToast(t("Could not copy","Copy කරන්න බැරි වුණා")); }
   };
 
   const size = (r: Region): [number, number] => doc.page_sizes[r.page] ?? [612, 792];
 
   return (
-    <Sheet onClose={onClose} leafy label="Original text">
-      <h3>Original එක <small>පිටුව {block.page + 1}</small></h3>
+    <Sheet onClose={onClose} leafy label={showTranslation ? "Translation" : "Original text"}>
+      <h3>{showTranslation ? t("Translation","Translation එක") : t("Original text","Original එක")} <small>{t("Page","පිටුව")} {block.page + 1} · ¶{block.seq+1}</small></h3>
       {textual && block.type !== "table" && (
-        <p className="original" onClick={(e) => { const w = wordAt(e.clientX, e.clientY); if (w) onWord(w); }}>{block.source}</p>
+        <p className="original" dir="auto" onClick={(e) => {if(!prefs.wordTap||window.getSelection()?.toString())return; const w = wordAt(e.clientX, e.clientY); if (w) onWord(w); }}>{detailText}</p>
       )}
-      {textual && block.type !== "table" && <p className="small" style={{ marginTop: -6 }}>English වචනයක් tap කරලා තේරුම බලන්න.</p>}
+      {prefs.displayMode==="both" && block.translated && <p className="original" dir="auto">{block.translated}</p>}
+      {block.type==="table"&&block.table&&<div className="tablewrap"><table><tbody>{(showTranslation?block.table_si||block.table:block.table).map((row,i)=><tr key={i}>{row.map((cell,j)=><td dir="auto" key={j}>{cell}</td>)}</tr>)}</tbody></table></div>}
+      {textual && block.type !== "table" && <p className="small" style={{ marginTop: -6 }}>{t("Tap a word for translation options.","වචනයක් tap කරලා translate කරන විදිය තෝරන්න.")}</p>}
       {block.regions.map((r, i) => <PageCrop key={i} docId={doc.id} r={r} size={size(r)} onZoom={onZoom} />)}
       {block.qa?.map((q) => <p className="qa" key={q}>{qaText(q)}</p>)}
 
       <div className="actions">
-        {isSpeakable(block) && (
-          <button className="act primary" onClick={() => onListen(block.seq)}><IconSpeaker width={19} height={19} />මෙතන ඉඳන් අහන්න</button>
+        {isSpeakable(block) && prefs.audioMode!=="off" && (
+          <button className="act primary" onClick={() => onListen(block.seq)}><IconSpeaker width={19} height={19} />{t("Listen to this passage","මෙතන ඉඳන් අහන්න")}</button>
         )}
-        <button className="act" onClick={() => { setMode(mode === "note" ? "" : "note"); setText(""); }}><IconNote width={19} height={19} />Note එකක්</button>
+        <button className="act" onClick={() => { setMode(mode === "note" ? "" : "note"); setText(""); }}><IconNote width={19} height={19} />{t("Add note","Note එකක්")}</button>
         {canTranslate && (
           <button className="act" onClick={() => { setMode(mode === "retranslate" ? "" : "retranslate"); setText(""); }}>
-            <IconRetry width={19} height={19} />ආයෙ translate
+            <IconRetry width={19} height={19} />{t("Retranslate · AI","ආයෙ translate · AI")}
           </button>
         )}
         {textual && <button className="act" onClick={copy}><IconCopy width={19} height={19} />Copy</button>}
+        {textual && <button className="act" onClick={() => go(`/study/${doc.id}?start=${block.seq}&end=${block.seq}`)}>{t("Quiz this passage","මේ කොටසෙන් quiz එකක්")}</button>}
       </div>
 
       <div className="swatches" role="group" aria-label="Highlight">
@@ -136,16 +144,16 @@ export default function BlockSheet({ doc, block, notes, onClose, onListen, onNot
       {mode === "note" && (
         <div>
           <textarea className="field" autoFocus value={text} onChange={(e) => setText(e.target.value)}
-            placeholder="මේ කොටස ගැන ඔයාගේ note එක" />
-          <div className="actions"><button className="act primary" disabled={busy || !text.trim()} onClick={saveNote}>Save කරන්න</button></div>
+            placeholder={t("Your note about this passage","මේ කොටස ගැන ඔයාගේ note එක")} />
+          <div className="actions"><button className="act primary" disabled={busy || !text.trim()} onClick={saveNote}>{t("Save note","Save කරන්න")}</button></div>
         </div>
       )}
       {mode === "retranslate" && (
         <div>
           <textarea className="field" autoFocus value={text} onChange={(e) => setText(e.target.value)}
-            placeholder="මොකක්ද වෙනස් කරන්න ඕන? (නැතත් කමක් නෑ) උදා: 'gradient' එක English වලින්ම තියන්න" />
+            placeholder={t("Optional instruction for this passage","මොකක්ද වෙනස් කරන්න ඕන? (නැතත් කමක් නෑ)")} />
           <div className="actions">
-            <button className="act primary" disabled={busy} onClick={retranslate}>{busy ? "Translate කරනවා..." : "ආයෙ translate කරන්න"}</button>
+            <button className="act primary" disabled={busy} onClick={retranslate}>{busy ? t("Translating…","Translate කරනවා...") : t("Confirm retranslation · AI","තහවුරු කර ආයෙ translate කරන්න · AI")}</button>
           </div>
         </div>
       )}

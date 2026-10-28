@@ -8,21 +8,26 @@ SINHALA_RE = re.compile(r"[඀-෿]")
 NUM_RE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*")
 CITE_RE = re.compile(r"\[\d+(?:\s*[,–\-]\s*\d+)*\]")
 
-HARD = {"empty", "no_sinhala"}
+HARD = {"empty", "no_sinhala", "target_script_missing"}
 
 
 def _nums(s: str) -> Counter:
     return Counter(n.replace(",", "") for n in NUM_RE.findall(s))
 
 
-def check(source: str, target: str, kind: str = "paragraph") -> list[str]:
+def check(source: str, target: str, kind: str = "paragraph", language: str = "si") -> list[str]:
+    language = language.split("-")[0]
     t = (target or "").strip()
     if not t:
         return ["empty"]
     issues: list[str] = []
     english_words = len(re.findall(r"[A-Za-z]{3,}", source))
-    if kind != "table_cell" and english_words >= 5 and not SINHALA_RE.search(t):
+    prose = english_words >= 5 or (not re.search(r"[A-Za-z]", source) and sum(c.isalpha() for c in source) >= 25)
+    if language == "si" and kind != "table_cell" and prose and not SINHALA_RE.search(t):
         issues.append("no_sinhala")
+    scripts = {"ta": r"[\u0b80-\u0bff]", "ar": r"[\u0600-\u06ff]", "he": r"[\u0590-\u05ff]"}
+    if language in scripts and kind != "table_cell" and prose and not re.search(scripts[language], t):
+        issues.append("target_script_missing")
     missing = [n for n in _nums(CITE_RE.sub(" ", source)) if n not in _nums(CITE_RE.sub(" ", t))]
     if missing:
         issues.append("missing_numbers:" + ",".join(missing[:6]))

@@ -100,7 +100,7 @@ def batch_requests(doc_id: str, settings) -> list[tuple[str, str, str, dict]]:
         if not chunk_text(doc_id, c["start_seq"], c["end_seq"]).strip():
             db.ex("UPDATE chunks SET summary=? WHERE doc_id=? AND idx=?", "(no text)", doc_id, c["idx"])
             continue
-        out.append((f"u{c['idx']}", prompts.UNDERSTAND_SYSTEM, _chunk_prompt(doc, c, len(chunks)), prompts.UNDERSTAND_SCHEMA))
+        out.append((f"u{c['idx']}", prompts.system_for("understand", settings), _chunk_prompt(doc, c, len(chunks)), prompts.UNDERSTAND_SCHEMA))
     return out
 
 
@@ -128,7 +128,7 @@ def run(doc_id: str, llm, settings, should_stop) -> None:
         if not chunk_text(doc_id, c["start_seq"], c["end_seq"]).strip():
             db.ex("UPDATE chunks SET summary=? WHERE doc_id=? AND idx=?", "(no text)", doc_id, c["idx"])
             return
-        res = llm.generate_json(prompts.UNDERSTAND_SYSTEM, _chunk_prompt(doc, c, len(chunks)),
+        res = llm.generate_json(prompts.system_for("understand", settings), _chunk_prompt(doc, c, len(chunks)),
                                 prompts.UNDERSTAND_SCHEMA, purpose="understand")
         save_chunk(doc_id, c["idx"], res)
 
@@ -150,8 +150,8 @@ def run(doc_id: str, llm, settings, should_stop) -> None:
             summaries = summaries[::step]
         terms = [r["term"] for r in db.q("SELECT term FROM glossary WHERE doc_id=? ORDER BY count DESC LIMIT 80", doc_id)]
         try:
-            res = llm.generate_json(prompts.BRIEF_SYSTEM, prompts.brief_prompt(doc["title"], summaries, terms),
-                                    prompts.BRIEF_SCHEMA, purpose="brief")
+            res = llm.generate_json(prompts.system_for("brief", settings), prompts.brief_prompt(doc["title"], summaries, terms),
+                                    prompts.brief_schema(), purpose="brief")
             db.add_usage(doc_id, res, "brief")
             brief = res.data
         except LLMError as e:
@@ -160,4 +160,4 @@ def run(doc_id: str, llm, settings, should_stop) -> None:
             log.warning("brief failed, continuing without it: %s", e)
             brief = {}
         db.update_doc(doc_id, brief=json.dumps(brief, ensure_ascii=False),
-                      title_si=str(brief.get("title_si") or "") or None, stage_done=total)
+                      title_si=str(brief.get("translated_title") or brief.get("title_si") or "") or None, stage_done=total)

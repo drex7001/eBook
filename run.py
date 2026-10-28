@@ -60,7 +60,10 @@ if __name__ == "__main__":
     local = f"http://127.0.0.1:{settings.port}"
     print(f"\n  eBook translator  ·  LLM: {settings.llm_provider} ({settings.model_label})  ·  TTS: {settings.gemini_tts_model}")
     print(f"  On this computer:  {local}   (or http://localhost:{settings.port})")
-    print(f"  On the network:    http://{lan_ip()}:{settings.port}\n")
+    if settings.host in ("0.0.0.0", "::"):
+        print(f"  On the network:    http://{lan_ip()}:{settings.port}\n")
+    else:
+        print("  LAN access is Off. Set HOST=0.0.0.0 in .env and restart to enable it on a trusted network.\n")
     server = uvicorn.Server(uvicorn.Config("server.api:app", log_level="warning"))
     if os.environ.get("OPEN_BROWSER", "1") != "0":
         threading.Thread(target=open_browser_when_ready, args=(server, local), daemon=True).start()

@@ -1,8 +1,8 @@
 @echo off
 setlocal
 cd /d %~dp0
-title eBook translator
-set CHECK=import uvicorn, fastapi, pymupdf, httpx, dotenv
+title Reading and Study Studio
+set CHECK=import uvicorn, fastapi, pymupdf, pymupdf4llm, httpx, dotenv; from zoneinfo import ZoneInfo; ZoneInfo('UTC'); assert int(pymupdf.__version__.split('.')[0]) ^>= 2
 
 if not exist .venv\Scripts\python.exe (
   echo Creating the Python environment...
@@ -29,5 +29,27 @@ if errorlevel 1 (
   )
 )
 
+if not exist web\dist\index.html (
+  where npm.cmd >nul 2>nul
+  if errorlevel 1 (
+    echo The reader UI needs to be built once. Install Node.js, then run start.bat again.
+    pause
+    exit /b 1
+  )
+  pushd web
+  call npm.cmd ci --no-audit --no-fund
+  if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+  )
+  call npm.cmd run build
+  if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+  )
+  popd
+)
 %PY% run.py
 pause

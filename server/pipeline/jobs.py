@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import db
 from ..config import settings
+from ..app_settings import runtime
 from ..llm import LLMError, get_llm
 from ..llm.gemini import batch_results, batch_state
 from ..parser import get_parser
@@ -97,9 +98,12 @@ class Worker:
                 log.exception("job failed for %s", doc_id)
                 db.update_doc(doc_id, status="error", error=str(e)[:1000])
             finally:
+                from ..translations import capture
+                capture(doc_id)
                 self.active = None
 
     def _run(self, doc_id: str) -> None:
+        settings = runtime(doc_id)
         stop = lambda: doc_id in self.stop_flags  # noqa: E731
         db.update_doc(doc_id, status="running", error=None)
         doc = db.get_doc(doc_id)
@@ -111,6 +115,9 @@ class Worker:
             log.info("parsed %s in %.1fs", doc_id, time.time() - t)
             stage = "understand"
             db.update_doc(doc_id, stage=stage)
+            if not db.get_doc(doc_id).get("auto_translate", 1):
+                db.update_doc(doc_id, status="paused")
+                return
         if stop():
             raise Paused()
         if stage == "understand":
@@ -136,6 +143,7 @@ class Worker:
         db.update_doc(doc_id, batch_jobs=json.dumps(jobs, ensure_ascii=False))
 
     def _submit_batch(self, doc_id: str, stage: str) -> bool:
+        settings = runtime(doc_id)
         """Send this stage's calls as one Batch API job. True = job is out, the doc now waits for the poller.
         False = carry on normally (stage already batched, too small, or batch mode unavailable)."""
         jobs = self._jobs(doc_id)
@@ -184,6 +192,7 @@ class Worker:
                     log.exception("batch poll failed for %s", r["id"])
 
     def poll(self, doc_id: str) -> None:
+        settings = runtime(doc_id)
         jobs = self._jobs(doc_id)
         for stage, j in jobs.items():
             if j.get("state") != "submitted":

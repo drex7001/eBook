@@ -36,6 +36,8 @@ class OllamaProvider:
             except httpx.ConnectError:
                 raise LLMError(f"Cannot reach Ollama at {self.base}. Is `ollama serve` running?", retryable=True)
             except httpx.HTTPError as e:
+                if purpose == "subject_quiz":
+                    raise LLMError("Quiz request was interrupted; no automatic retry.", retryable=True) from e
                 last = str(e)
                 time.sleep(2 + attempt * 3)
                 continue
@@ -46,6 +48,8 @@ class OllamaProvider:
                 body["format"] = "json"
                 continue
             if r.status_code != 200:
+                if purpose == "subject_quiz":
+                    raise LLMError(f"Quiz provider returned HTTP {r.status_code}; no automatic retry.")
                 last = f"{r.status_code}: {r.text[:300]}"
                 time.sleep(2 + attempt * 3)
                 continue
@@ -53,8 +57,11 @@ class OllamaProvider:
             text = (j.get("message") or {}).get("content", "")
             try:
                 data = parse_json_loose(text)
-            except ValueError:
+            except ValueError as e:
+                if purpose == "subject_quiz":
+                    raise LLMError("Quiz response was not valid JSON; output retained without a new request.",
+                                   result=LLMResult({}, int(j.get("prompt_eval_count") or 0), int(j.get("eval_count") or 0), text, model=self.model)) from e
                 last = f"invalid JSON: {text[:200]}"
                 continue
-            return LLMResult(data, int(j.get("prompt_eval_count") or 0), int(j.get("eval_count") or 0), text)
+            return LLMResult(data, int(j.get("prompt_eval_count") or 0), int(j.get("eval_count") or 0), text, model=self.model)
         raise LLMError(f"Ollama kept failing: {last}", retryable=True)

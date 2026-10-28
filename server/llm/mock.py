@@ -18,11 +18,26 @@ class MockProvider:
     def __init__(self, settings=None, model: str | None = None, delay: float = 0.05):
         self.model = model or "mock"
         self.delay = delay
+        self.target = getattr(settings, "target_language", "si")
 
     def generate_json(self, system: str, prompt: str, schema: dict, purpose: str = "") -> LLMResult:
         from ..pipeline.prompts import extract_items
 
         time.sleep(self.delay)
+        if purpose == "subject_quiz":
+            payload = json.loads(prompt.split("<QUIZ_INPUT>")[1].split("</QUIZ_INPUT>")[0])
+            questions = []
+            avoid = set(payload.get("avoid", []))
+            for i in range(payload["count"]):
+                source = payload["sources"][i % len(payload["sources"])]
+                number = len(avoid) + i + 1
+                quote = source["text"][:160]
+                questions.append({"question": f"[Mock {payload['difficulty']} {number}] Which statement is supported by passage {source['seq']}?",
+                                  "options": [quote, "The passage states the opposite.", "This claim is not stated in the material.", "None of the source material applies."],
+                                  "answer": 0, "explanation": "Offline sample: the first statement quotes the supplied source.",
+                                  "distractors": ["Supported by the quoted passage.", "Contradicts the passage.", "Not supported by the source.", "The passage does support one answer."],
+                                  "source_seq": source["seq"], "source_quote": quote})
+            return self._r({"questions": questions}, prompt, 300)
         if purpose == "understand":
             body = prompt.split("--- BEGIN PORTION ---")[-1].split("--- END PORTION ---")[0]
             words = re.findall(r"\b[A-Z][a-zA-Z\-]{3,}\b", body)
@@ -52,7 +67,8 @@ class MockProvider:
                                   "audio_text": f"I heard the word {word} today." if kind == "listen" else ""})
             return self._r({"items": items}, prompt, 300)
         items = extract_items(prompt)
-        out = [{"id": it["id"], "si": "සිං: " + it["text"]} for it in items]
+        prefix = {"si": "සිං: ", "ta": "தமிழ்: ", "ar": "العربية: ", "en": "Translation: "}.get(self.target, f"[{self.target}] ")
+        out = [{"id": it["id"], "text": prefix + it["text"], "si": prefix + it["text"]} for it in items]
         return self._r({"translations": out, "new_terms": []}, prompt, sum(len(i["text"]) for i in items) // 2)
 
     def _r(self, data: dict, prompt: str, out: int) -> LLMResult:

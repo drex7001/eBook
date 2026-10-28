@@ -1,123 +1,79 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api";
-import type { Block } from "./types";
+import { actionKey, api } from "./api";
+import { useSettings } from "./prefs";
+import { cancelSpeech, languageFor, speak } from "./speech";
+import type { Block, TranslationProfile } from "./types";
 
-const SPEAKABLE = new Set(["heading", "paragraph", "list_item", "caption", "footnote"]);
-export const isSpeakable = (b: Block) => SPEAKABLE.has(b.type) && !!(b.translated || b.source || "").trim();
-
-export type AudioState = "idle" | "loading" | "playing" | "paused";
-
-/** Paragraph-by-paragraph player: asks the server for one block's audio at a time, prefetches the next two. */
-export function useAudio(docId: string, blocks: Block[], voice: string, rate: number, title: string,
-  onError: (msg: string) => void) {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const blocksRef = useRef(blocks);
-  blocksRef.current = blocks;
-  const [seq, setSeq] = useState<number | null>(null);
-  const seqRef = useRef<number | null>(null);
-  const [state, setState] = useState<AudioState>("idle");
-  const cache = useRef(new Map<string, Promise<string | null>>());
-  const token = useRef(0);
-
-  if (!audioRef.current && typeof Audio !== "undefined") audioRef.current = new Audio();
-
-  const next = useCallback((from: number, dir = 1): number | null => {
-    const bs = blocksRef.current;
-    for (let i = from + dir; i >= 0 && i < bs.length; i += dir) if (isSpeakable(bs[i])) return i;
+export function isSpeakable(b: Block) {return !["figure","equation","table","reference"].includes(b.type)&&!!(b.translated||b.source||"").trim();}
+type Session={end:number;start:number;side:"original"|"translated";grant:string;keys:Map<number,string>};
+export function useAudio(docId:string,blocks:Block[],voice:string,rate:number,_title:string,onError:(s:string)=>void,profile?:TranslationProfile) {
+  const p=useSettings();
+  const prefs=useRef(p);prefs.current=p;
+  const languages=useRef(profile);languages.current=profile;
+  const rows=useRef(blocks);rows.current=blocks;
+  const player=useRef<HTMLAudioElement|null>(null),session=useRef<Session|null>(null),token=useRef(0),current=useRef<number|null>(null);
+  const playRef=useRef<(n:number)=>Promise<void>>(async()=>{});
+  const [seq,setSeq]=useState<number|null>(null),[state,setState]=useState<"idle"|"loading"|"playing"|"paused">("idle");
+  const stop=useCallback(()=>{
+    token.current++;player.current?.pause();cancelSpeech();
+    const old=session.current;session.current=null;
+    if(old?.grant)void api.revokeAudio(old.grant).catch(()=>{});
+    current.current=null;setSeq(null);setState("idle");
+  },[]);
+  const next=useCallback((from:number,dir=1)=>{
+    const s=session.current;if(!s)return null;
+    for(let i=from+dir;i>=s.start&&i<=s.end&&i<rows.current.length;i+=dir)if(isSpeakable(rows.current[i]))return i;
     return null;
-  }, []);
-
-  const urlFor = useCallback((s: number) => {
-    const b = blocksRef.current[s];
-    const key = `${s}|${voice}|${b?.rev ?? 0}`;
-    let p = cache.current.get(key);
-    if (!p) {
-      p = api.tts(docId, s, voice).then((r) => r.url ?? null);
-      p.catch(() => cache.current.delete(key));
-      cache.current.set(key, p);
-    }
-    return p;
-  }, [docId, voice]);
-
-  const stop = useCallback(() => {
-    token.current++;
-    audioRef.current?.pause();
-    setSeq(null);
-    seqRef.current = null;
-    setState("idle");
-  }, []);
-
-  const playAt = useCallback(async (s: number) => {
-    const my = ++token.current;
-    const a = audioRef.current!;
-    a.pause();
-    setSeq(s);
-    seqRef.current = s;
-    setState("loading");
-    try {
-      const url = await urlFor(s);
-      if (my !== token.current) return;
-      if (!url) {
-        const n = next(s);
-        if (n != null) playAt(n); else stop();
+  },[]);
+  const play=useCallback(async(n:number)=>{
+    const s=session.current,b=rows.current[n];
+    if(!s||!b||n<s.start||n>s.end||prefs.current.audio_mode==="off"){stop();return;}
+    const my=++token.current;current.current=n;setSeq(n);setState("loading");
+    const text=s.side==="original"?b.source:b.translated||b.source;
+    try{
+      if(prefs.current.audio_mode==="device"){
+        setState("playing");
+        const lang=languageFor(text,s.side==="original"?languages.current?.source_language||prefs.current.source_language:languages.current?.target_language||prefs.current.target_language);
+        await speak(text,prefs.current.rate,lang);
+      }else{
+        if(!s.keys.has(n))s.keys.set(n,actionKey());
+        const r=await api.tts(docId,n,voice,s.grant,s.side,s.keys.get(n)!);
+        if(my!==token.current)return;
+        if(!r.url){const following=next(n);if(following!==null)await playRef.current(following);else stop();return;}
+        const a=player.current||(player.current=new Audio());a.pause();a.src=r.url;a.playbackRate=prefs.current.rate;
+        await a.play();if(my!==token.current){a.pause();return;}setState("playing");
+        a.onended=()=>{if(my!==token.current)return;const following=next(n);if(following!==null)void playRef.current(following);else stop();};
         return;
       }
-      a.src = url;
-      a.playbackRate = rate;
-      await a.play();
-      if (my !== token.current) return;
-      setState("playing");
-      let n: number | null = s;
-      for (let k = 0; k < 2; k++) {
-        n = n == null ? null : next(n);
-        if (n == null) break;
-        urlFor(n).catch(() => {});
+      if(my!==token.current)return;
+      const following=next(n);if(following!==null)await playRef.current(following);else stop();
+    }catch(e){if(my!==token.current)return;stop();onError((e as Error).message);}
+  },[docId,voice,next,stop,onError]);
+  playRef.current=play;
+  const playAt=useCallback(async(n:number,scope:"paragraph"|"chapter"="paragraph",side:"original"|"translated"=prefs.current.display_mode==="original"?"original":"translated")=>{
+    stop();if(prefs.current.audio_mode==="off"){onError("Voice is Off. Enable it in App settings.");return;}
+    let end=n,grant="";const my=token.current;
+    try{
+      if(prefs.current.audio_mode==="cloud"){
+        const result=await api.authorizeAudio(docId,n,scope,side,voice);
+        if(my!==token.current){void api.revokeAudio(result.grant_id);return;}
+        end=result.end_seq;grant=result.grant_id;
+      }else if(scope==="chapter"){
+        for(let i=n+1;i<rows.current.length;i++){if(rows.current[i].type==="heading"&&rows.current[i].level<=2)break;end=i;}
       }
-    } catch (e) {
-      if (my !== token.current) return;
-      setState("paused");
-      onError((e as Error).message || "Audio එක හදන්න බැරි වුණා");
+      session.current={start:n,end,side,grant,keys:new Map()};await play(n);
+    }catch(e){onError((e as Error).message);}
+  },[docId,voice,play,stop,onError]);
+  const toggle=useCallback(()=>{
+    if(prefs.current.audio_mode==="device"){
+      if(state==="playing"){speechSynthesis.pause();setState("paused");}else if(state==="paused"){speechSynthesis.resume();setState("playing");}
+    }else if(player.current){
+      if(state==="playing"){player.current.pause();setState("paused");}else if(state==="paused"){void player.current.play().then(()=>setState("playing")).catch((e)=>onError(e.message));}
     }
-  }, [urlFor, next, rate, stop, onError]);
-
-  const toggle = useCallback(() => {
-    const a = audioRef.current!;
-    if (state === "playing") { a.pause(); setState("paused"); }
-    else if (state === "paused" && seqRef.current != null) {
-      if (a.src && !a.ended) a.play().then(() => setState("playing")).catch(() => playAt(seqRef.current!));
-      else playAt(seqRef.current);
-    }
-  }, [state, playAt]);
-
-  const skip = useCallback((dir: 1 | -1) => {
-    if (seqRef.current == null) return;
-    const n = next(seqRef.current, dir);
-    if (n != null) playAt(n);
-  }, [next, playAt]);
-
-  useEffect(() => {
-    const a = audioRef.current;
-    if (!a) return;
-    a.onended = () => {
-      const s = seqRef.current;
-      const n = s == null ? null : next(s);
-      if (n != null) playAt(n); else stop();
-    };
-  }, [next, playAt, stop]);
-
-  useEffect(() => { if (audioRef.current) audioRef.current.playbackRate = rate; }, [rate]);
-  useEffect(() => () => { audioRef.current?.pause(); }, []);
-
-  // lock-screen / headset controls
-  useEffect(() => {
-    if (!("mediaSession" in navigator) || seq == null) return;
-    const ms = navigator.mediaSession;
-    ms.metadata = new MediaMetadata({ title: (blocksRef.current[seq]?.translated || "").slice(0, 60), artist: title });
-    ms.setActionHandler("play", toggle);
-    ms.setActionHandler("pause", toggle);
-    ms.setActionHandler("nexttrack", () => skip(1));
-    ms.setActionHandler("previoustrack", () => skip(-1));
-  }, [seq, title, toggle, skip]);
-
-  return { seq, state, playAt, toggle, skip, stop };
+  },[state,onError]);
+  const skip=useCallback((dir:1|-1)=>{if(current.current!==null){const n=next(current.current,dir);if(n!==null)void play(n);else onError("The next paragraph is outside the authorized listening scope.");}},[next,play,onError]);
+  useEffect(()=>{if(player.current)player.current.playbackRate=rate;},[rate]);
+  useEffect(()=>{stop();},[p.audio_mode,p.voice,p.tts_model,p.display_mode,p.target_language,stop]);
+  useEffect(()=>()=>stop(),[stop]);
+  return {seq,state,playAt,toggle,skip,stop,side:session.current?.side};
 }

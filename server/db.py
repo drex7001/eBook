@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS usage_log(
 
 # columns added after the first release: (table, column, type)
 MIGRATIONS = [
+    ("documents", "active_run", "TEXT"),
+    ("documents", "auto_translate", "INT DEFAULT 1"),
+    ("usage_log", "audio_seconds", "REAL DEFAULT 0"),
+    ("usage_log", "estimate_known", "INT DEFAULT 1"),
+    ("words", "source_language", "TEXT DEFAULT 'en'"),
+    ("words", "target_language", "TEXT DEFAULT 'si'"),
     ("documents", "cached_tokens", "INT DEFAULT 0"),
     ("documents", "thought_tokens", "INT DEFAULT 0"),
     ("documents", "cost_usd", "REAL DEFAULT 0"),
@@ -99,6 +105,11 @@ def init() -> None:
         have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
         if col not in have:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    from .beta_storage import init_beta
+    init_beta(c)
+    from .config import PRICES
+    known = ["mock", *PRICES]
+    c.execute(f"UPDATE usage_log SET estimate_known=CASE WHEN model IN ({','.join('?' for _ in known)}) THEN 1 ELSE 0 END", known)
 
 
 def next_rev() -> int:
@@ -160,8 +171,15 @@ def add_usage(doc_id: str | None, res, purpose: str = "") -> None:
         ex("UPDATE documents SET prompt_tokens=prompt_tokens+?, output_tokens=output_tokens+?, llm_calls=llm_calls+1, "
            "cached_tokens=cached_tokens+?, thought_tokens=thought_tokens+?, cost_usd=cost_usd+? WHERE id=?",
            res.prompt_tokens, res.output_tokens, res.cached_tokens, res.thought_tokens, cost, doc_id)
-    ex("INSERT INTO usage_log VALUES(?,?,?,?,?,?,?,?,?,?)", time.time(), doc_id, purpose, res.model,
-       res.prompt_tokens, res.output_tokens, res.cached_tokens, res.thought_tokens, 1 if res.batch else 0, cost)
+    ex("INSERT INTO usage_log(at,doc_id,purpose,model,prompt_tokens,output_tokens,cached_tokens,thought_tokens,batch,cost,estimate_known) "
+       "VALUES(?,?,?,?,?,?,?,?,?,?,?)", time.time(), doc_id, purpose, res.model,
+       res.prompt_tokens, res.output_tokens, res.cached_tokens, res.thought_tokens, 1 if res.batch else 0, cost,
+       int(res.model == 'mock' or price_for_model(res.model)))
+
+
+def price_for_model(model: str) -> bool:
+    from .config import price_for
+    return price_for(model) is not None
 
 
 def get_doc(doc_id: str) -> dict | None:
@@ -180,6 +198,7 @@ def block_row_to_api(r: sqlite3.Row) -> dict:
         d["table"] = json.loads(r["source_table"])
     if r["translated_table"]:
         d["table_si"] = json.loads(r["translated_table"])
+        d["translated_table"] = d["table_si"]
     if r["qa"]:
         d["qa"] = json.loads(r["qa"])
     return d

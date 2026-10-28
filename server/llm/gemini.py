@@ -89,22 +89,36 @@ class GeminiProvider:
             try:
                 r = self.client.post(url, headers=headers, json=self._body(system, prompt, schema))
             except httpx.HTTPError as e:
+                if purpose == "subject_quiz":
+                    raise LLMError("Quiz request was interrupted. It was not repeated because it may already have been processed.", retryable=True) from e
                 last = f"network error: {e}"
                 time.sleep(min(60, 2 ** attempt + random.random()))
                 continue
 
             if r.status_code == 200:
-                j = r.json()
-                text, finish = self._text(j)
-                ptok, otok, ctok, ttok = self.usage(j)
+                try:
+                    j = r.json()
+                    text, finish = self._text(j)
+                    ptok, otok, ctok, ttok = self.usage(j)
+                except (ValueError, TypeError, AttributeError) as e:
+                    if purpose == "subject_quiz":
+                        raise LLMError("Quiz response could not be decoded; received bytes retained without retry.",
+                                       result=LLMResult({}, raw=r.text, model=self.model)) from e
+                    raise
                 if not text:
+                    if purpose == "subject_quiz":
+                        raise LLMError(f"Quiz response had no text ({finish}); no automatic retry.",
+                                       result=LLMResult({}, ptok, otok, text, ctok, ttok, self.model))
                     if finish in BLOCK_REASONS:
                         raise LLMError(f"Gemini blocked this request ({finish}).")
                     last = f"empty response ({finish})"
                     continue
                 try:
                     return LLMResult(parse_json_loose(text), ptok, otok, text, ctok, ttok, self.model)
-                except ValueError:
+                except ValueError as e:
+                    if purpose == "subject_quiz":
+                        raise LLMError("Quiz response was not valid JSON; output retained without a new request.",
+                                       result=LLMResult({}, ptok, otok, text, ctok, ttok, self.model)) from e
                     last = f"invalid JSON (finish={finish}): {text[:200]}"
                     if finish == "MAX_TOKENS":
                         raise LLMError("Gemini output hit the token limit; use a smaller batch size.", retryable=True)
@@ -131,12 +145,16 @@ class GeminiProvider:
             if r.status_code in (401, 403):
                 raise LLMError(f"Gemini refused the request ({r.status_code}): {msg}")
             if r.status_code == 404:
+                if purpose == "subject_quiz":
+                    raise LLMError("The selected quiz model was not found. Select an available model before generating; no automatic model fallback.")
                 if self.fallback_model:
                     log.warning("Gemini model %s not found, using %s", self.model, self.fallback_model)
                     self.model, self.fallback_model = self.fallback_model, None
                     continue
                 raise LLMError(f'Gemini model "{self.model}" was not found. Set GEMINI_MODEL in .env. ({msg})')
             if r.status_code in (429, 500, 502, 503, 504):
+                if purpose == "subject_quiz":
+                    raise LLMError(f"Quiz provider returned HTTP {r.status_code}; request not automatically repeated.", retryable=True)
                 wait = _retry_delay(err) or min(90, 2 ** (attempt + 1) + random.random() * 2)
                 log.info("Gemini %s, waiting %.0fs: %s", r.status_code, wait, msg[:120])
                 last = f"{r.status_code}: {msg}"

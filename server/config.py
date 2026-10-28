@@ -36,7 +36,7 @@ def _float_or_none(name: str) -> float | None:
 @dataclass
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(_env("DATA_DIR", str(ROOT / "data"))))
-    host: str = field(default_factory=lambda: _env("HOST", "0.0.0.0"))
+    host: str = field(default_factory=lambda: _env("HOST", "127.0.0.1"))
     port: int = field(default_factory=lambda: _int("PORT", 8000))
 
     # ---- LLM (translation + understanding) ----
@@ -100,6 +100,7 @@ settings = Settings()
 # ai.google.dev/gemini-api/docs/pricing (October 2026). gemini-3.8-flash doubles from 2027-01-01.
 # Batch jobs cost half of these. On the free tier the real cost is 0; the app then shows what it *would* cost.
 PRICES = {
+    "gemini-3.8-flash-tts": (0.50, 9.00, 0.0),
     "gemini-3.8-flash": (0.75, 3.75, 0.075),
     "gemini-3.5-flash-lite": (0.30, 2.50, 0.03),
     "gemini-3.1-flash-lite": (0.25, 1.50, 0.025),
@@ -109,6 +110,6 @@ PRICES = {
 def price_for(model: str) -> tuple[float, float, float] | None:
     import datetime
     p = PRICES.get(model)
-    if p and model == "gemini-3.8-flash" and datetime.date.today() >= datetime.date(2027, 1, 1):
+    if p and model in ("gemini-3.8-flash", "gemini-3.8-flash-tts") and datetime.date.today() >= datetime.date(2027, 1, 1):
         p = tuple(x * 2 for x in p)
     return p

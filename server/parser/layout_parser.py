@@ -419,7 +419,8 @@ def _table_cells(box) -> list[list[str]] | None:
 
 def _table_mode(cells: list[list[str]]) -> str:
     non_empty = [c for r in cells for c in r if c]
-    wordy = [c for c in non_empty if len(re.findall(r"[A-Za-z]{2,}", c)) >= 3]
+    wordy = [c for c in non_empty if len(re.findall(r"[^\W\d_]{2,}", c, re.UNICODE)) >= 3
+             or (any(ord(ch) > 127 and ch.isalpha() for ch in c) and sum(ch.isalpha() for ch in c) >= 8)]
     return "html" if non_empty and len(wordy) / len(non_empty) >= 0.3 else "image"
 
 

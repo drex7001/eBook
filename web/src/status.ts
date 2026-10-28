@@ -1,4 +1,5 @@
 import type { Doc } from "./types";
+import { getCurrentSettings } from "./prefs";
 
 export function pct(n: number, d: number) {
   return d > 0 ? Math.round((100 * n) / d) : 0;
@@ -6,6 +7,16 @@ export function pct(n: number, d: number) {
 
 /** One short line describing where the pipeline is, in the app's code-mixed voice. */
 export function jobLine(d: Doc): string {
+  if(getCurrentSettings().interface_language==="en"){
+    if(d.status==="error")return "Translation interrupted";
+    if(d.status==="paused")return `Paused · ${pct(d.translated,d.translatable)}% translated`;
+    if(d.status==="queued")return "Queued";
+    if(d.status==="waiting")return `Waiting for batch · ${d.stage}`;
+    if(d.status==="done")return d.failed?`Complete · ${d.failed} passages need attention`:"Translation complete";
+    if(d.stage==="parse")return `Reading PDF ${d.stage_done}/${d.stage_total||d.page_count}`;
+    if(d.stage==="understand")return `Understanding ${d.stage_done}/${d.stage_total}`;
+    return `Translating ${pct(d.translated,d.translatable)}%`;
+  }
   if (d.status === "error") return "Error එකක් ආවා";
   if (d.status === "paused") return `Pause කරලා, ${pct(d.translated, d.translatable)}%ක් translate වෙලා`;
   if (d.status === "queued") return "පෝලිමේ ඉන්නවා";
